@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Segment Anything ONNX inference</title>
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+</head>
+<body>
+    <h3>Segment Anything ONNX Demo</h3>
+    1. Upload an image<br/>
+    2. Click on top left and then on bottom right corners of an object that you want to segment from the image<br/>
+    3. See the extracted object below the image<br/><br/>
+    <input id="uploadInput" type="file"/><br/><br/>
+    <img id="sourceImage"/><br/><br/>
+    <canvas></canvas>
+    <script>
+
+        const ENCODER_MODEL_PATH = "vit_b_encoder.onnx";
+        const DECODER_MODEL_PATH = "vit_b_decoder.onnx";
+
+        let [orig_width, orig_height, resized_width, resized_height] = [0,0,0,0]
+        let image_embeddings = null;
+
+        const input = document.getElementById("uploadInput");
+        const img = document.getElementById("sourceImage");
+
+        input.addEventListener("change",async(event) => {
+            await create_image_embeddings(event.target.files[0])
+            const reader = new FileReader();
+            reader.onloadend = () => { img.src = reader.result; }
+            reader.readAsDataURL(event.target.files[0]);
+        })
+
+        function create_image_embeddings(image_file) {
+            return new Promise((resolve) => {
+                const img = new Image();
+                img.onload = async() => {
+                    const input_tensor = prepare_input(img);
+                    const encoder = await ort.InferenceSession.create(ENCODER_MODEL_PATH);
+                    const input = new ort.Tensor(Float32Array.from(input_tensor),[1, 3, 1024, 1024]);
+                    const outputs = await encoder.run({images:input});
+                    image_embeddings = outputs["embeddings"].data;
+                    resolve();
+                };
+                const reader = new FileReader();
+                reader.onloadend = () => { img.src = reader.result; }
+                reader.readAsDataURL(image_file);
+            })
+        }
+
+        function prepare_input(img) {
+            [orig_width, orig_height] = [img.width, img.height];
+
+            if (orig_width > orig_height) {
+                resized_width = 1024
+                resized_height = parseInt(1024 / orig_width * orig_height);
+            } else {
+                resized_height = 1024
+                resized_width = parseInt(1024 / orig_height * orig_width);
+            }
+
+            const canvas = document.createElement("canvas");
+            canvas.width = 1024;
+            canvas.height = 1024;
+            const ctx = canvas.getContext("2d");
+            ctx.globalAlpha = 0.0
+            ctx.fillRect(0,0,1024,1024)
+            ctx.globalAlpha = 1.0;
+            ctx.drawImage(img, 0, 0, orig_width, orig_height, 0, 0, resized_width, resized_height);
+
+            const mean = [123.675, 116.28, 103.53]
+            const std = [58.395, 57.12, 57.375];
+
+            const [red, green, blue] = [[],[],[]]
+            const imgData = ctx.getImageData(0,0,1024,1024).data;
+            for (let index=0; index<imgData.length; index+=4) {
+                if (imgData[index+3]===0) {
+                    red.push(0);
+                    green.push(0);
+                    blue.push(0)
+                } else {
+                    red.push((imgData[index]-mean[0])/std[0])
+                    green.push((imgData[index+1]-mean[1])/std[1])
+                    blue.push((imgData[index+2]-mean[2])/std[2])
+                }
+            }
+            return [...red, ...green, ...blue];
+        }
+
+        let box = [];
+        img.addEventListener("click", async(event) => {
+          box.push(event.pageX - event.target.offsetLeft, event.pageY - event.target.offsetTop);
+          if (box.length === 4) {
+              if (box[0]>box[2]) {
+                  [box[0], box[2]] = [box[2], box[0]];
+              }
+              if (box[1]>box[3]) {
+                  [box[1], box[3]] = [box[3], box[1]];
+              }
+              const prompt = prepare_prompt(box);
+              const mask = await decode_mask(prompt,box);
+              extract_object_by_mask(box, mask)
+              box = []
+          }
+        });
+
+        function prepare_prompt(box) {
+            const [x, y, width, height] = [box[0], box[1], box[2]-box[0], box[3]-box[1]];
+            const [coefX,coefY] = [(resized_width / orig_width), (resized_height / orig_height)];
+            return [x * coefX, y*coefY, (x+width)*coefX, (y+height)*coefY];
+        }
+
+        async function decode_mask(prompt, box) {
+            const decoder = await ort.InferenceSession.create(DECODER_MODEL_PATH);
+            const embeddings = new ort.Tensor(Float32Array.from(image_embeddings),[1,256,64,64]);
+            const point_coords = new ort.Tensor(Float32Array.from(prompt),[1, 2, 2]);
+            const point_labels = new ort.Tensor(Float32Array.from([2,3]),[1,2])
+            const orig_im_size = new ort.Tensor(Float32Array.from([orig_height,orig_width]),[2])
+            const mask_input = new ort.Tensor(Float32Array.from(Array(256*256).fill(0)),[1,1,256,256])
+            const has_mask_input = new ort.Tensor(Float32Array.from([0]),[1])
+            const masks_output = await decoder.run({
+                image_embeddings: embeddings,
+                point_coords: point_coords,
+                point_labels: point_labels,
+                mask_input: mask_input,
+                has_mask_input: has_mask_input,
+                orig_im_size: orig_im_size
+            });
+            const mask = masks_output.masks.data.map(value => value > 0 ? 1 : 0);
+            const [x1, y1, x2, y2] = box;
+            const result = [];
+            for (let y=y1; y<y2; y++) {
+                for (let x=x1; x<x2; x++) {
+                    result.push(mask[y*orig_width+x]);
+                }
+            }
+            return result;
+        }
+
+        function extract_object_by_mask(box, mask) {
+            const [x1, y1, x2, y2] = box;
+            const canvas = document.querySelector("canvas");
+            const img = document.getElementById("sourceImage")
+            canvas.width = x2 - x1;
+            canvas.height = y2 - y1;
+            const ctx = canvas.getContext("2d");
+            ctx.drawImage(img, x1, y1, canvas.width, canvas.height, 0, 0, canvas.width, canvas.height);
+            const imgData = ctx.getImageData(0,0,canvas.width,canvas.height);
+            for (let index=0; index<mask.length; index++) {
+                imgData.data[index*4+3] = mask[index] ? 255 : 0;
+            }
+            ctx.putImageData(imgData, 0, 0);
+        }
+    </script>
+</body>
+</html>
