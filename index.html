@@ -24,33 +24,72 @@
         const input = document.getElementById("uploadInput");
         const img = document.getElementById("sourceImage");
 
+        /**
+         * Upload image handler
+         */
         input.addEventListener("change",async(event) => {
+            // Load the image from uploaded file and
+            // get embeddings from it, using Segment Anything encoder model
             await create_image_embeddings(event.target.files[0])
+            // Read the uploaded file and display it as an image
             const reader = new FileReader();
             reader.onloadend = () => { img.src = reader.result; }
             reader.readAsDataURL(event.target.files[0]);
         })
 
+        /**
+         * Loads "image_file" as an image and
+         * passes it through Segment Anything encoder model
+         * to get and save embeddings for future use
+         * @param image_file - The uploaded file object
+         */
         function create_image_embeddings(image_file) {
             return new Promise((resolve) => {
+                // Load uploaded file as an image object
                 const img = new Image();
-                img.onload = async() => {
-                    const input_tensor = prepare_input(img);
-                    const encoder = await ort.InferenceSession.create(ENCODER_MODEL_PATH);
-                    const input = new ort.Tensor(Float32Array.from(input_tensor),[1, 3, 1024, 1024]);
-                    const outputs = await encoder.run({images:input});
-                    image_embeddings = outputs["embeddings"].data;
-                    resolve();
-                };
                 const reader = new FileReader();
                 reader.onloadend = () => { img.src = reader.result; }
                 reader.readAsDataURL(image_file);
+                img.onload = async() => {
+                    // as soon, as image loaded, run encoder model on
+                    // it to get embeddings
+                    image_embeddings = await run_encoder(img);
+                    resolve();
+                };
             })
         }
 
+        /**
+         * Runs Segment Anything encoder model for "img"
+         * and returns embeddings of shape (1,256,64,64) as a flat array
+         * @param img - source image object
+         * @returns image embeddings array
+         */
+        async function run_encoder(img) {
+            // Prepare input tensor from image for encoder model with (1,3,1024,1024) shape
+            const input_tensor = prepare_input(img);
+            // Load Segment Anything model encoder ONNX file
+            const encoder = await ort.InferenceSession.create(ENCODER_MODEL_PATH);
+            // Prepare input tensor for the inference
+            const input = new ort.Tensor(Float32Array.from(input_tensor),[1, 3, 1024, 1024]);
+            // Run the inference
+            const outputs = await encoder.run({images:input});
+            // Return image embeddings
+            return outputs["embeddings"].data;
+        }
+
+        /**
+         * Converts the input image to a normalized tensor of (1,3,1024,1024) shape
+         * that required for the Segment Anything encoder model
+         * @param img - source image object
+         * @returns flat array of 1*3*1024*1024 size
+         */
         function prepare_input(img) {
+            // Save original image width and height to use later
             [orig_width, orig_height] = [img.width, img.height];
 
+            // Get the new size for input image using 1024 as a long side
+            // preserving aspect ratio
             if (orig_width > orig_height) {
                 resized_width = 1024
                 resized_height = parseInt(1024 / orig_width * orig_height);
@@ -59,6 +98,7 @@
                 resized_width = parseInt(1024 / orig_height * orig_width);
             }
 
+            // Create transparent canvas of 1024x1024 size
             const canvas = document.createElement("canvas");
             canvas.width = 1024;
             canvas.height = 1024;
@@ -66,58 +106,104 @@
             ctx.globalAlpha = 0.0
             ctx.fillRect(0,0,1024,1024)
             ctx.globalAlpha = 1.0;
+
+            // Resize the input image to previously calculated size and draw it
+            // on the canvas
             ctx.drawImage(img, 0, 0, orig_width, orig_height, 0, 0, resized_width, resized_height);
 
+            // Normalization coefficients for pixels for each color channel (Red, Green, Blue)
             const mean = [123.675, 116.28, 103.53]
             const std = [58.395, 57.12, 57.375];
 
+            // Get Red, Green and Blue color components for each pixel of canvas, normalize them
+            // and store to separate arrays
             const [red, green, blue] = [[],[],[]]
             const imgData = ctx.getImageData(0,0,1024,1024).data;
             for (let index=0; index<imgData.length; index+=4) {
                 if (imgData[index+3]===0) {
+                    // if pixel is transparent, just add zeros
                     red.push(0);
                     green.push(0);
                     blue.push(0)
                 } else {
+                    // if pixel is not transparent, normalize it's values
                     red.push((imgData[index]-mean[0])/std[0])
                     green.push((imgData[index+1]-mean[1])/std[1])
                     blue.push((imgData[index+2]-mean[2])/std[2])
                 }
             }
+            // concatenate arrays of color components to single flat array
             return [...red, ...green, ...blue];
         }
 
+        // Coordinates of object corners that user selected by clicking the image
         let box = [];
+
+        /**
+         * Runs when user clicks on the image.
+         */
         img.addEventListener("click", async(event) => {
-          box.push(event.pageX - event.target.offsetLeft, event.pageY - event.target.offsetTop);
-          if (box.length === 4) {
-              if (box[0]>box[2]) {
-                  [box[0], box[2]] = [box[2], box[0]];
-              }
-              if (box[1]>box[3]) {
-                  [box[1], box[3]] = [box[3], box[1]];
-              }
-              const prompt = prepare_prompt(box);
-              const mask = await decode_mask(prompt,box);
-              extract_object_by_mask(box, mask)
-              box = []
-          }
+            // Push coordinates of mouse to the coordinates array [x,y]
+            box.push(event.pageX - event.target.offsetLeft, event.pageY - event.target.offsetTop);
+
+            // If this is a second time when mouse clicked
+            if (box.length === 4) {
+                // Order coordinates to make top left corner go first
+                // and bottom right corner next [x1,y1,x2,y2]
+                if (box[0]>box[2]) {
+                    [box[0], box[2]] = [box[2], box[0]];
+                }
+                if (box[1]>box[3]) {
+                    [box[1], box[3]] = [box[3], box[1]];
+                }
+
+                // Encode prompt from box coordinates
+                const prompt = prepare_prompt(box);
+
+                // Run Segment Anything decoder model to get segmentation mask
+                const mask = await decode_mask(prompt,box);
+
+                // Extract portion from image using "box" coordinates
+                // and apply "mask" to it to make transparent background
+                // around it
+                extract_object_by_mask(box, mask)
+                box = []
+            }
         });
 
+        /**
+         * Prepares the prompt for Segment Anything decoder model
+         * using "box" coordinates
+         * @param box - coordinates of bound rectangle [x1, y1, x2, y2]
+         * @returns array - Prompt for decoder model as a flat array
+         */
         function prepare_prompt(box) {
             const [x, y, width, height] = [box[0], box[1], box[2]-box[0], box[3]-box[1]];
             const [coefX,coefY] = [(resized_width / orig_width), (resized_height / orig_height)];
+            // Scale box coordinates to the size of resized image
             return [x * coefX, y*coefY, (x+width)*coefX, (y+height)*coefY];
         }
 
+        /**
+         * Runs Segment Anything mask decoder model
+         * to decode segmentation mask for the object inside selected "box"
+         * @param prompt - encoded prompt of the "box"
+         * @param box - coordinates of corners [x1,y1,x2,y2]
+         * @returns The pixel matrix of [x1, y1, x2, y2] size as a flat array.
+         */
         async function decode_mask(prompt, box) {
+            // Load the Segment Anything decoder model
             const decoder = await ort.InferenceSession.create(DECODER_MODEL_PATH);
+
+            // Set input parameters for the model (embeddings, prompt, original image size etc
             const embeddings = new ort.Tensor(Float32Array.from(image_embeddings),[1,256,64,64]);
             const point_coords = new ort.Tensor(Float32Array.from(prompt),[1, 2, 2]);
-            const point_labels = new ort.Tensor(Float32Array.from([2,3]),[1,2])
+            const point_labels = new ort.Tensor(Float32Array.from([2,3]),[1,box.length / 2])
             const orig_im_size = new ort.Tensor(Float32Array.from([orig_height,orig_width]),[2])
             const mask_input = new ort.Tensor(Float32Array.from(Array(256*256).fill(0)),[1,1,256,256])
             const has_mask_input = new ort.Tensor(Float32Array.from([0]),[1])
+
+            // Run decoder model
             const masks_output = await decoder.run({
                 image_embeddings: embeddings,
                 point_coords: point_coords,
@@ -126,7 +212,15 @@
                 has_mask_input: has_mask_input,
                 orig_im_size: orig_im_size
             });
+
+            // Decode returned output to the array of pixels. Each pixel
+            // can be either "1" if it belongs to the selected object or "0"
+            // if it belongs to background
             const mask = masks_output.masks.data.map(value => value > 0 ? 1 : 0);
+
+            // The returned mask has a size of original image.
+            // You need to extract only the part of it for the object
+            // inside the "box"
             const [x1, y1, x2, y2] = box;
             const result = [];
             for (let y=y1; y<y2; y++) {
@@ -134,17 +228,32 @@
                     result.push(mask[y*orig_width+x]);
                 }
             }
+
+            // Return the resulted mask for the object inside [x1,y1,x2,y2] box
             return result;
         }
 
+        /**
+         * Displays extracted object below the source image
+         * and applies the mask to it to make transparent
+         * background
+         * @param box - top left and bottom right coordinates of the object on the source image [x1, y1, x2, y2]
+         * @param mask - the pixel mask of the object of the same size as the object as a flat array
+         */
         function extract_object_by_mask(box, mask) {
             const [x1, y1, x2, y2] = box;
+
+            // Setup canvas below the original image
             const canvas = document.querySelector("canvas");
             const img = document.getElementById("sourceImage")
             canvas.width = x2 - x1;
             canvas.height = y2 - y1;
             const ctx = canvas.getContext("2d");
+
+            // Draw the portion of image inside the "box"
             ctx.drawImage(img, x1, y1, canvas.width, canvas.height, 0, 0, canvas.width, canvas.height);
+
+            // Apply the "mask" to the canvas, making all "0" pixels in the mask transparent
             const imgData = ctx.getImageData(0,0,canvas.width,canvas.height);
             for (let index=0; index<mask.length; index++) {
                 imgData.data[index*4+3] = mask[index] ? 255 : 0;

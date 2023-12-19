@@ -3,6 +3,10 @@
 This sample web application shows how to use [Segment Anything](https://https://segment-anything.com/) neural network
 to segment objects in images right in a web browser without any backend, using only JavaScript and [ONNX runtime](https://onnxruntime.ai/).
 
+# Demo
+
+[Demo](https://raw.githubusercontent.com/AndreyGermanov/sam_onnx_javascript/main/demo.gif)
+
 # Install
 
 1. Clone this repository: `git clone git@github.com:AndreyGermanov/sam_onnx_javascript.git`
