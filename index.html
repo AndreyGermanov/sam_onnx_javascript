@@ -15,11 +15,18 @@
     <canvas></canvas>
     <script>
 
+        // Paths to Segment Anything Encoder and Decoder models, exported to ONNX
+        // Find here how to export Segment Anything to ONNX:
+        // https://github.com/AndreyGermanov/sam_onnx_full_export/blob/main/sam_onnx_export.ipynb
         const ENCODER_MODEL_PATH = "vit_b_encoder.onnx";
         const DECODER_MODEL_PATH = "vit_b_decoder.onnx";
 
-        let [orig_width, orig_height, resized_width, resized_height] = [0,0,0,0]
+        // Image embeddings from encoder saved here (required by mask decoder)
         let image_embeddings = null;
+
+        // Initial size and scaled size saved here (required by mask decoder)
+        let [orig_width, orig_height, resized_width, resized_height] = [0,0,0,0];
+
 
         const input = document.getElementById("uploadInput");
         const img = document.getElementById("sourceImage");
