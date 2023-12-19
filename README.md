@@ -5,7 +5,7 @@ to segment objects in images right in a web browser without any backend, using o
 
 # Demo
 
-[Demo](https://raw.githubusercontent.com/AndreyGermanov/sam_onnx_javascript/main/demo.gif)
+![Demo](https://raw.githubusercontent.com/AndreyGermanov/sam_onnx_javascript/main/demo.gif)
 
 # Install
 
